@@ -1,0 +1,24 @@
+{
+    "name": "watchtowerx/beaconx",
+    "description": "The official monitoring beacon for WatchTowerX",
+    "type": "library",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "WatchTowerX\\BeaconX\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "WatchTowerX\\BeaconX\\BeaconServiceProvider"
+            ]
+        }
+    },
+    "require": {
+        "php": "^8.1",
+        "illuminate/support": "^10.0|^11.0",
+        "illuminate/console": "^10.0|^11.0",
+        "illuminate/http": "^10.0|^11.0"
+    }
+}
