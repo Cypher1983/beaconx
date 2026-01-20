@@ -2,7 +2,7 @@
 
 **The Official Monitoring Signal for WatchTowerX.**
 
-BeaconX is a lightweight Laravel package designed to be installed on client applications. It gathers critical system health metrics and transmits them back to your central **WatchTowerX** hub.
+BeaconX is a comprehensive Laravel package designed to be installed on client applications. It gathers extensive system, application, and infrastructure health metrics and transmits them back to your central **WatchTowerX** hub for monitoring and alerting.
 
 ---
 
@@ -58,22 +58,113 @@ use Illuminate\Support\Facades\Schedule;
 Schedule::command('beacon:transmit')->everyMinute();
 ```
 
+## Advanced Features
+
+### Request Logging for Performance Metrics
+
+To enable average response time tracking, create a middleware and database table:
+
+```php
+// Create migration for request logs
+php artisan make:migration create_request_logs_table
+
+// In the migration:
+Schema::create('request_logs', function (Blueprint $table) {
+    $table->id();
+    $table->string('method');
+    $table->string('url');
+    $table->float('response_time');
+    $table->timestamps();
+});
+
+// Create middleware
+php artisan make:middleware LogRequestTime
+
+// In LogRequestTime middleware:
+public function handle($request, Closure $next)
+{
+    $start = microtime(true);
+    $response = $next($request);
+    $end = microtime(true);
+
+    DB::table('request_logs')->insert([
+        'method' => $request->method(),
+        'url' => $request->fullUrl(),
+        'response_time' => ($end - $start) * 1000, // milliseconds
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    return $response;
+}
+```
+
+### Cache Monitoring
+
+For enhanced cache statistics, use Redis as your cache driver. BeaconX will automatically detect and report detailed cache metrics including hit rates and cache size.
+
 ## Metrics Collected
 
-BeaconX automatically gathers and transmits:
+BeaconX automatically gathers and transmits comprehensive health metrics across multiple categories:
 
-- **System:** Disk Usage and RAM Usage.
-- **Workload:** Total number of failed background jobs.
-- **Runtime:** PHP and Laravel versions for environment consistency.
-- **Identity:** The APP_NAME defined in your client application.
+### System Metrics
+
+- **Disk Usage:** Percentage of disk space used
+- **RAM Usage:** Percentage of memory utilization
+- **CPU Usage:** System load average as percentage
+- **Network I/O:** Bytes received and transmitted
+- **Disk I/O:** Read/write operations per second
+- **System Uptime:** Seconds since system boot
+
+### Application Workload
+
+- **Failed Jobs:** Total number of failed background jobs
+- **Pending Jobs:** Number of queued jobs waiting to be processed
+- **Processed Today:** Jobs completed in the current day
+
+### Database Health
+
+- **Connection Status:** Database connectivity and health
+- **Query Latency:** Response time for database queries
+- **Active Connections:** Current database connection count
+
+### Cache Performance
+
+- **Cache Driver:** Type of cache driver in use
+- **Cache Size:** Number of cached items
+- **Hit/Miss Rates:** Cache performance statistics
+
+### Application Performance
+
+- **Average Response Time:** Mean response time for HTTP requests (requires request logging)
+
+### Security Monitoring
+
+- **SSL Certificate Expiry:** Days until SSL certificate expires
+- **File Permissions:** Read/write access for critical files (.env, storage, cache directories)
+
+### Operational Metrics
+
+- **Log File Sizes:** Size of application log files
+- **Active Sessions:** Number of users with recent activity
+
+### Runtime Environment
+
+- **Identity:** The APP_NAME defined in your client application
+- **PHP Version:** Current PHP version
+- **Laravel Version:** Current Laravel framework version
 
 ## Security
 
-Data is transmitted over HTTPS and authenticated via a secure X-Beacon-Token header. No sensitive environment variables (like .env contents) are ever transmitted.
+Data is transmitted over HTTPS and authenticated via a secure X-Beacon-Token header. No sensitive environment variables (like .env contents) are ever transmitted. All metrics are designed to be safe for external monitoring without exposing confidential information.
+
+## Error Handling
+
+BeaconX includes comprehensive error handling for all metrics. If a metric cannot be collected (due to permissions, missing dependencies, or system limitations), it gracefully degrades by returning safe default values and logging warnings for debugging.
 
 ## Contributing
 
-If you wish to extend the metrics gathered, please submit a PR to the internal watchtowerx/beaconx repository.
+BeaconX now provides comprehensive monitoring capabilities. If you wish to extend the metrics gathered or add new monitoring features, please submit a PR to the internal watchtowerx/beaconx repository. The package is designed to be extensible while maintaining performance and security standards.
 
 ---
 
