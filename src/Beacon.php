@@ -136,7 +136,7 @@ class Beacon
             return [
                 'status' => 'healthy',
                 'latency_ms' => round($latency * 1000, 2),
-                'connections' => DB::getConnections(),
+                'connections' => count(config('database.connections', [])),
             ];
         } catch (\Exception $e) {
             Log::warning('BeaconX: Database health check failed', ['error' => $e->getMessage()]);
