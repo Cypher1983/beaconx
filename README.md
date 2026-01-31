@@ -13,7 +13,22 @@ BeaconX is a comprehensive Laravel package designed to be installed on client ap
 - PHP 8.1+
 - Laravel 10.x or 11.x
 
-### 2. Install via Composer
+### 2. Add Repository to Composer
+
+Since BeaconX is hosted on GitHub and not available on Packagist, you need to add the repository to your `composer.json`:
+
+```json
+{
+  "repositories": [
+    {
+      "type": "vcs",
+      "url": "https://github.com/watchtowerx/beaconx.git"
+    }
+  ]
+}
+```
+
+### 3. Install via Composer
 
 Add the package to your Laravel application:
 
@@ -21,7 +36,7 @@ Add the package to your Laravel application:
 composer require watchtowerx/beaconx
 ```
 
-### 3. Publish Configuration
+### 4. Publish Configuration
 
 Publish the beacon.php config file to your application's config directory:
 
@@ -165,25 +180,3 @@ BeaconX includes comprehensive error handling for all metrics. If a metric canno
 ## Contributing
 
 BeaconX now provides comprehensive monitoring capabilities. If you wish to extend the metrics gathered or add new monitoring features, please submit a PR to the internal watchtowerx/beaconx repository. The package is designed to be extensible while maintaining performance and security standards.
-
----
-
-### Final Project Recap
-
-You now have a complete, professional monitoring ecosystem:
-
-1. **WatchTowerX (The Hub):** A VILT stack app that receives data, stores it in `health_logs`, and sends alerts via Telegram/Email if a "heartbeat" is missed.
-2. **BeaconX (The Package):** A standalone Composer package that you can install on any Laravel site to turn it into a reporting "node."
-
-### One last pro-tip:
-
-If you plan on hosting this package privately on GitHub, make sure you add the repository to your client app's `composer.json` like this before running `composer require`:
-
-```json
-"repositories": [
-    {
-        "type": "vcs",
-        "url": "https://github.com/your-username/beaconx.git"
-    }
-]
-```
