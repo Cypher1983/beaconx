@@ -53,6 +53,137 @@ WATCHTOWER_HUB_URL=https://your-watchtower-hub.com/api/v1/report
 WATCHTOWER_API_TOKEN=your_unique_site_token
 ```
 
+## Docker Compatibility
+
+BeaconX is fully compatible with Docker containers and works seamlessly in containerized Laravel applications.
+
+### ✅ **Fully Supported Metrics**
+
+- Application identity and runtime versions
+- Database health and connection monitoring
+- Cache performance statistics
+- File permissions and log sizes
+- SSL certificate expiry checks
+- Session monitoring
+
+### ⚠️ **Limited System Metrics in Minimal Containers**
+
+Some system-level metrics require additional utilities that may not be present in minimal Docker images:
+
+- **RAM Usage**: Requires `free` command
+- **CPU Usage**: Requires `nproc` command
+- **Network I/O**: Requires `/proc/net/dev` access
+- **Disk I/O**: Requires `iostat` command
+- **System Uptime**: Requires `/proc/uptime` access
+
+When these utilities are unavailable, BeaconX gracefully returns safe default values (typically `0`) without breaking functionality.
+
+### 🔧 **Recommended Docker Setup**
+
+For full system monitoring capabilities, ensure your Docker image includes the necessary utilities:
+
+```dockerfile
+FROM php:8.1-fpm
+
+# Install system monitoring utilities
+RUN apt-get update && apt-get install -y \
+    procps \
+    sysstat \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+Or for Alpine-based images:
+
+```dockerfile
+RUN apk add --no-cache procps sysstat
+```
+
+### 📊 **Docker Metrics Status**
+
+| Metric Category          | Docker Status | Notes                           |
+| ------------------------ | ------------- | ------------------------------- |
+| **Application Identity** | ✅ Full       | Uses Laravel configuration      |
+| **Runtime Versions**     | ✅ Full       | PHP and Laravel versions        |
+| **Database Health**      | ✅ Full       | Laravel DB connections          |
+| **Cache Stats**          | ✅ Full       | Laravel cache facade            |
+| **File Permissions**     | ✅ Full       | Standard PHP file functions     |
+| **SSL Certificate**      | ✅ Full       | PHP stream functions            |
+| **Log Sizes**            | ✅ Full       | File system access              |
+| **Sessions**             | ✅ Full       | Laravel session handling        |
+| **Disk Usage**           | ✅ Full       | PHP `disk_free_space()`         |
+| **RAM Usage**            | ⚠️ Limited    | Requires `free` command         |
+| **CPU Usage**            | ⚠️ Limited    | Requires `nproc` command        |
+| **Network I/O**          | ⚠️ Limited    | Requires `/proc/net/dev` access |
+| **Disk I/O**             | ⚠️ Limited    | Requires `iostat` command       |
+| **System Uptime**        | ⚠️ Limited    | Requires `/proc/uptime` access  |
+
+## Laravel Multi-Tenancy Compatibility
+
+BeaconX is fully compatible with Laravel multi-tenancy applications and automatically adapts to tenant-specific contexts.
+
+### ✅ **Fully Supported Features**
+
+- **Database Monitoring**: Automatically monitors the current tenant's database connections and job queues
+- **Cache Monitoring**: Respects tenant-specific cache stores and configurations
+- **Session Monitoring**: Handles tenant-specific session drivers (database, Redis, file-based)
+- **Configuration**: Uses Laravel's standard config system, respecting tenant-specific settings
+
+### ⚠️ **Tenant-Specific Considerations**
+
+Some metrics may vary based on your multi-tenancy implementation:
+
+- **File Permissions**: May check tenant-specific storage paths if your multi-tenancy package isolates file systems
+- **Log Files**: Monitors tenant-specific log directories when available
+- **SSL Monitoring**: Uses tenant-specific URLs from `config('app.url')`
+- **Application Identity**: Displays tenant-specific app names when configured
+
+### 🔧 **Multi-Tenancy Setup Recommendations**
+
+#### **1. Tenant-Specific Configuration**
+
+Make beacon settings tenant-aware:
+
+```php
+// In your tenant configuration
+'beacon' => [
+    'hub_url' => env('TENANT_WATCHTOWER_HUB_URL'),
+    'token'   => env('TENANT_WATCHTOWER_API_TOKEN'),
+]
+```
+
+#### **2. Command Execution**
+
+Ensure the beacon command runs in the correct tenant context:
+
+```php
+// Schedule per tenant or globally based on your needs
+Schedule::command('beacon:transmit')
+    ->everyMinute()
+    ->onOneServer();
+```
+
+#### **3. Monitoring Strategy**
+
+Choose your monitoring approach:
+
+- **Per-Tenant**: Run commands in each tenant context for isolated monitoring
+- **Global**: Monitor shared infrastructure metrics
+- **Hybrid**: Combine tenant-specific data with system-wide metrics
+
+### 📊 **Multi-Tenancy Compatibility Matrix**
+
+| Feature              | Multi-Tenant Status | Notes                                |
+| -------------------- | ------------------- | ------------------------------------ |
+| **Database Health**  | ✅ Full Support     | Uses tenant's DB connection          |
+| **Cache Stats**      | ✅ Full Support     | Respects tenant cache config         |
+| **Job Queues**       | ✅ Full Support     | Monitors tenant-specific queues      |
+| **File Permissions** | ⚠️ Depends          | May check tenant-specific paths      |
+| **Log Files**        | ⚠️ Depends          | May monitor tenant-specific logs     |
+| **Sessions**         | ⚠️ Depends          | Depends on session isolation         |
+| **System Metrics**   | ✅ Full Support     | System-level (shared across tenants) |
+| **SSL Monitoring**   | ⚠️ Depends          | Uses tenant-specific URLs            |
+| **App Identity**     | ⚠️ Depends          | May show tenant-specific names       |
+
 ## Usage
 
 ### Manual Transmission
