@@ -21,11 +21,25 @@ class TransmitMetrics extends Command
             return;
         }
 
-        $response = Http::withHeaders(['X-Beacon-Token' => $token])
-            ->post($url, $beacon->emit());
+        try {
+            // Bypass SSL verification for HTTPS (common on Windows with self-signed certs)
+            $response = Http::withHeaders(['X-Beacon-Token' => $token])
+                ->withoutVerifying()
+                ->timeout(10)
+                ->post($url, $beacon->emit());
 
-        $response->successful()
-            ? $this->info('📡 Signal received by WatchTowerX.')
-            : $this->error('❌ Signal lost. Status: ' . $response->status());
+            if ($response->successful()) {
+                $this->info('📡 Signal received by WatchTowerX.');
+            } else {
+                $statusCode = $response->status();
+                $body = $response->body();
+                $this->error("❌ Signal lost. Status: {$statusCode}");
+                if (!empty($body)) {
+                    $this->error("Response: " . substr($body, 0, 500));
+                }
+            }
+        } catch (\Exception $e) {
+            $this->error('❌ Failed to transmit signal: ' . $e->getMessage());
+        }
     }
 }

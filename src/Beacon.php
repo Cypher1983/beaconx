@@ -53,23 +53,50 @@ class Beacon
 
     private function getRamPercentage()
     {
-        $mem = shell_exec('free -m');
-        if (!$mem) return 0;
-        $lines = explode("\n", trim($mem));
-        $stats = preg_split('/\s+/', $lines[1]);
-        return round(($stats[2] / $stats[1]) * 100, 2);
+        try {
+            if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+                $mem = @shell_exec('wmic OS get TotalVisibleMemorySize,FreePhysicalMemory /value');
+                if (!$mem) return 0;
+                $totalMatch = [];
+                $freeMatch = [];
+                preg_match('/TotalVisibleMemorySize=(\d+)/', $mem, $totalMatch);
+                preg_match('/FreePhysicalMemory=(\d+)/', $mem, $freeMatch);
+                if (!$totalMatch || !$freeMatch) return 0;
+                $total = (int) $totalMatch[1];
+                $free = (int) $freeMatch[1];
+                $used = $total - $free;
+                return round(($used / $total) * 100, 2);
+            } else {
+                $mem = @shell_exec('free -m');
+                if (!$mem) return 0;
+                $lines = explode("\n", trim($mem));
+                if (count($lines) < 2) return 0;
+                $stats = preg_split('/\s+/', $lines[1]);
+                return count($stats) > 2 ? round(($stats[2] / $stats[1]) * 100, 2) : 0;
+            }
+        } catch (\Exception $e) {
+            return 0;
+        }
     }
 
     private function getCpuPercentage(): float
     {
         try {
-            $load = sys_getloadavg();
-            if (!$load) return 0;
-            // Convert load average to percentage (rough estimate)
-            $cpuCount = (int) shell_exec('nproc') ?: 1;
-            return round(min($load[0] / $cpuCount * 100, 100), 2);
+            if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+                $cpu = @shell_exec('wmic cpu get loadpercentage /value');
+                $matches = [];
+                if ($cpu && preg_match('/LoadPercentage=(\d+)/', $cpu, $matches)) {
+                    return (float) $matches[1];
+                }
+                return 0;
+            } else {
+                $load = @sys_getloadavg();
+                if (!$load) return 0;
+                // Convert load average to percentage (rough estimate)
+                $cpuCount = (int) @shell_exec('nproc') ?: 1;
+                return round(min($load[0] / $cpuCount * 100, 100), 2);
+            }
         } catch (\Exception $e) {
-            Log::warning('BeaconX: Failed to get CPU usage', ['error' => $e->getMessage()]);
             return 0;
         }
     }
@@ -77,7 +104,10 @@ class Beacon
     private function getNetworkStats(): array
     {
         try {
-            $netstat = shell_exec('cat /proc/net/dev 2>/dev/null | grep -E "(eth0|enp|wlan)" | head -1');
+            if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+                return ['rx' => 0, 'tx' => 0];
+            }
+            $netstat = @shell_exec('cat /proc/net/dev 2>/dev/null | grep -E "(eth0|enp|wlan)" | head -1');
             if (!$netstat) return ['rx' => 0, 'tx' => 0];
 
             $parts = preg_split('/\s+/', trim($netstat));
@@ -88,7 +118,6 @@ class Beacon
                 'tx' => (int) $parts[9], // bytes transmitted
             ];
         } catch (\Exception $e) {
-            Log::warning('BeaconX: Failed to get network stats', ['error' => $e->getMessage()]);
             return ['rx' => 0, 'tx' => 0];
         }
     }
@@ -96,7 +125,10 @@ class Beacon
     private function getDiskIO(): array
     {
         try {
-            $iostat = shell_exec('iostat -d 1 1 2>/dev/null | grep -E "(sda|vda|nvme)" | head -1');
+            if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+                return ['reads' => 0, 'writes' => 0];
+            }
+            $iostat = @shell_exec('iostat -d 1 1 2>/dev/null | grep -E "(sda|vda|nvme)" | head -1');
             if (!$iostat) return ['reads' => 0, 'writes' => 0];
 
             $parts = preg_split('/\s+/', trim($iostat));
@@ -107,7 +139,6 @@ class Beacon
                 'writes' => round((float) $parts[2], 2), // writes/sec
             ];
         } catch (\Exception $e) {
-            Log::warning('BeaconX: Failed to get disk I/O', ['error' => $e->getMessage()]);
             return ['reads' => 0, 'writes' => 0];
         }
     }
@@ -115,13 +146,15 @@ class Beacon
     private function getUptime(): int
     {
         try {
-            $uptime = shell_exec('cat /proc/uptime 2>/dev/null');
+            if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+                return 0;
+            }
+            $uptime = @shell_exec('cat /proc/uptime 2>/dev/null');
             if (!$uptime) return 0;
 
             $parts = explode(' ', trim($uptime));
-            return (int) $parts[0];
+            return isset($parts[0]) ? (int) $parts[0] : 0;
         } catch (\Exception $e) {
-            Log::warning('BeaconX: Failed to get uptime', ['error' => $e->getMessage()]);
             return 0;
         }
     }
@@ -130,21 +163,100 @@ class Beacon
     {
         try {
             $start = microtime(true);
+            $maxTimeout = 3; // 3 second hard limit
+
+            // Execute query with timeout protection
             DB::select('SELECT 1');
             $latency = microtime(true) - $start;
 
+            // Return timeout error if query took too long
+            if ($latency > $maxTimeout) {
+                return [
+                    'status' => 'unhealthy',
+                    'error' => "Database query timeout (>{$maxTimeout}s)",
+                    'latency_ms' => (float) number_format($latency * 1000, 2, '.', ''),
+                ];
+            }
+
+            $locks = $this->getDatabaseLockCount();
+
             return [
                 'status' => 'healthy',
-                'latency_ms' => round($latency * 1000, 2),
-                'connections' => DB::getConnections(),
+                'latency_ms' => (float) number_format($latency * 1000, 2, '.', ''),
+                'locks' => $locks,
             ];
         } catch (\Exception $e) {
-            Log::warning('BeaconX: Database health check failed', ['error' => $e->getMessage()]);
             return [
                 'status' => 'unhealthy',
                 'error' => $e->getMessage(),
                 'latency_ms' => 0,
             ];
+        }
+    }
+
+    private function getDatabaseLockCount(): ?int
+    {
+        try {
+            // Use system connection if configured (for elevated privileges)
+            $connection = config('beacon.system_db_connection');
+            $db = $connection ? DB::connection($connection) : DB::connection();
+
+            // Get the driver name properly
+            if ($connection) {
+                $driver = config("database.connections.{$connection}.driver");
+            } else {
+                $defaultConnection = config('database.default');
+                $driver = config("database.connections.{$defaultConnection}.driver");
+            }
+
+            if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                // Try MySQL 8.0+ performance_schema first
+                try {
+                    $row = $db->selectOne('SELECT COUNT(*) AS cnt FROM performance_schema.data_locks');
+                    return isset($row->cnt) ? (int) $row->cnt : 0;
+                } catch (\Exception $e) {
+                    // Fall back to older information_schema for MySQL 5.7 and below
+                    try {
+                        $row = $db->selectOne('SELECT COUNT(*) AS cnt FROM information_schema.innodb_locks');
+                        return isset($row->cnt) ? (int) $row->cnt : 0;
+                    } catch (\Exception $e2) {
+                        // If both fail, return 0 instead of null
+                        return 0;
+                    }
+                }
+            } elseif ($driver === 'pgsql') {
+                $row = $db->selectOne('SELECT COUNT(*) AS cnt FROM pg_locks');
+            } elseif ($driver === 'sqlsrv') {
+                // SQL Server - handle permission issues gracefully
+                try {
+                    $row = $db->selectOne('SELECT COUNT(*) AS cnt FROM sys.dm_tran_locks');
+                    return isset($row->cnt) ? (int) $row->cnt : 0;
+                } catch (\Exception $e) {
+                    $errorMsg = $e->getMessage();
+                    // Permission denied or authentication failures - return null silently
+                    if (
+                        str_contains($errorMsg, 'permission was denied') ||
+                        str_contains($errorMsg, 'Login failed')
+                    ) {
+                        return null;
+                    }
+                    throw $e;
+                }
+            } else {
+                return null;
+            }
+
+            return isset($row->cnt) ? (int) $row->cnt : 0;
+        } catch (\Exception $e) {
+            $errorMsg = $e->getMessage();
+            // Only log unexpected errors (not permissions or auth issues)
+            if (
+                !str_contains($errorMsg, 'permission was denied') &&
+                !str_contains($errorMsg, 'Login failed')
+            ) {
+                Log::warning('BeaconX: Failed to get database lock count', ['error' => $errorMsg]);
+            }
+            return null;
         }
     }
 
@@ -290,7 +402,7 @@ class Beacon
                 return 0;
             } elseif ($driver === 'file') {
                 // Count session files modified in last 30 minutes
-                $sessionPath = session_save_path() ?: sys_get_temp_dir() . '/sessions';
+                $sessionPath = config('session.files') ?: session_save_path() ?: sys_get_temp_dir() . '/sessions';
                 if (!is_dir($sessionPath)) return 0;
 
                 $files = glob($sessionPath . '/sess_*');
