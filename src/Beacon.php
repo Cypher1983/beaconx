@@ -225,6 +225,7 @@ class Beacon
 
             return [
                 'status' => 'healthy',
+                'driver' => config('database.connections.' . config('database.default') . '.driver'),
                 'latency_ms' => (float) number_format($latency * 1000, 2, '.', ''),
                 'locks' => $locks,
                 'connections_active' => $connections['active'],
