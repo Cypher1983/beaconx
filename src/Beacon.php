@@ -54,7 +54,7 @@ class Beacon
             $total = disk_total_space($root);
             if (!$free || !$total) return 0;
             return round((1 - ($free / $total)) * 100, 2);
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to get disk usage', ['error' => $e->getMessage()]);
             return 0;
         }
@@ -80,7 +80,7 @@ class Beacon
             if (count($lines) < 2) return 0;
             $stats = preg_split('/\s+/', $lines[1]);
             return count($stats) > 2 ? round(($stats[2] / $stats[1]) * 100, 2) : 0;
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to get RAM usage', ['error' => $e->getMessage()]);
             return 0;
         }
@@ -101,7 +101,7 @@ class Beacon
             if (!$load) return 0;
             $cpuCount = (int) @shell_exec('nproc') ?: 1;
             return round(min($load[0] / $cpuCount * 100, 100), 2);
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to get CPU usage', ['error' => $e->getMessage()]);
             return 0;
         }
@@ -123,7 +123,7 @@ class Beacon
                 'rx' => (int) $parts[1],
                 'tx' => (int) $parts[9],
             ];
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to get network stats', ['error' => $e->getMessage()]);
             return ['rx' => 0, 'tx' => 0];
         }
@@ -145,7 +145,7 @@ class Beacon
                 'reads' => round((float) $parts[1], 2),
                 'writes' => round((float) $parts[2], 2),
             ];
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to get disk I/O', ['error' => $e->getMessage()]);
             return ['reads' => 0, 'writes' => 0];
         }
@@ -166,7 +166,7 @@ class Beacon
             if (!$uptime) return 0;
             $parts = explode(' ', trim($uptime));
             return isset($parts[0]) ? (int) $parts[0] : 0;
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to get uptime', ['error' => $e->getMessage()]);
             return 0;
         }
@@ -196,7 +196,7 @@ class Beacon
                 'latency_ms' => (float) number_format($latency * 1000, 2, '.', ''),
                 'locks' => $locks,
             ];
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             return [
                 'status' => 'unhealthy',
                 'error' => $e->getMessage(),
@@ -222,11 +222,11 @@ class Beacon
                 try {
                     $row = $db->selectOne('SELECT COUNT(*) AS cnt FROM performance_schema.data_locks');
                     return isset($row->cnt) ? (int) $row->cnt : 0;
-                } catch (\Exception $e) {
+                } catch (\Throwable $e) {
                     try {
                         $row = $db->selectOne('SELECT COUNT(*) AS cnt FROM information_schema.innodb_locks');
                         return isset($row->cnt) ? (int) $row->cnt : 0;
-                    } catch (\Exception $e2) {
+                    } catch (\Throwable $e2) {
                         return 0;
                     }
                 }
@@ -236,7 +236,7 @@ class Beacon
                 try {
                     $row = $db->selectOne('SELECT COUNT(*) AS cnt FROM sys.dm_tran_locks');
                     return isset($row->cnt) ? (int) $row->cnt : 0;
-                } catch (\Exception $e) {
+                } catch (\Throwable $e) {
                     $errorMsg = $e->getMessage();
                     if (
                         str_contains($errorMsg, 'permission was denied') ||
@@ -251,7 +251,7 @@ class Beacon
             }
 
             return isset($row->cnt) ? (int) $row->cnt : 0;
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $errorMsg = $e->getMessage();
             if (
                 !str_contains($errorMsg, 'permission was denied') &&
@@ -283,13 +283,13 @@ class Beacon
                     $stats['size'] = $info['db0']['keys'] ?? 0;
                     $stats['hits'] = $info['keyspace_hits'] ?? 0;
                     $stats['misses'] = $info['keyspace_misses'] ?? 0;
-                } catch (\Exception $e) {
+                } catch (\Throwable $e) {
                     // Redis stats not available
                 }
             }
 
             return $stats;
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to get cache stats', ['error' => $e->getMessage()]);
             return ['driver' => 'unknown', 'size' => 0, 'hits' => 0, 'misses' => 0];
         }
@@ -305,7 +305,7 @@ class Beacon
             return round(DB::table('request_logs')
                 ->where('created_at', '>=', now()->subHour())
                 ->avg('response_time') ?? 0, 2);
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to get average response time', ['error' => $e->getMessage()]);
             return 0;
         }
@@ -332,7 +332,7 @@ class Beacon
             if (!$certInfo || !isset($certInfo['validTo_time_t'])) return null;
 
             return $certInfo['validTo_time_t'] - time();
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to check SSL certificate', ['error' => $e->getMessage()]);
             return null;
         }
@@ -360,7 +360,7 @@ class Beacon
                 }
             }
             return $results;
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to check file permissions', ['error' => $e->getMessage()]);
             return [];
         }
@@ -380,7 +380,7 @@ class Beacon
             }
 
             return $sizes;
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to get log sizes', ['error' => $e->getMessage()]);
             return [];
         }
@@ -412,7 +412,7 @@ class Beacon
             }
 
             return 0;
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to get active sessions', ['error' => $e->getMessage()]);
             return 0;
         }
