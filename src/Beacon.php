@@ -197,6 +197,11 @@ class Beacon
             $replicationLag = $this->getDbReplicationLag();
             $dbSize = $this->getDbSizeMb();
             $deadTuples = $this->getDbDeadTuples();
+            $abortedConnections = $this->getDbAbortedConnections();
+            $slowQueries = $this->getDbSlowQueryCount();
+            $waitingQueries = $this->getDbWaitingQueries();
+            $largestTables = $this->getDbLargestTables();
+            $autovacuumStaleness = $this->getDbAutovacuumStaleness();
 
             return [
                 'status' => 'healthy',
@@ -206,11 +211,16 @@ class Beacon
                 'connections_max' => $connections['max'],
                 'connections_used_pct' => $connections['used_pct'],
                 'long_running_queries' => $longRunning,
+                'waiting_queries' => $waitingQueries,
                 'deadlocks' => $deadlocks,
+                'aborted_connections' => $abortedConnections,
+                'slow_queries' => $slowQueries,
                 'buffer_pool_hit_ratio' => $bufferPoolHitRatio,
                 'replication_lag_seconds' => $replicationLag,
                 'size_mb' => $dbSize,
                 'dead_tuples' => $deadTuples,
+                'autovacuum_max_staleness_seconds' => $autovacuumStaleness,
+                'largest_tables' => $largestTables,
             ];
         } catch (\Throwable $e) {
             return [
@@ -512,6 +522,153 @@ class Beacon
             return $row ? (int) $row->cnt : null;
         } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to get dead tuple count', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbAbortedConnections(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                $row = DB::selectOne("SHOW GLOBAL STATUS LIKE 'Aborted_connects'");
+                return $row ? (int) $row->Value : null;
+            }
+
+            return null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get aborted connections', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbSlowQueryCount(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                $row = DB::selectOne("SHOW GLOBAL STATUS LIKE 'Slow_queries'");
+                return $row ? (int) $row->Value : null;
+            }
+
+            if ($driver === 'pgsql') {
+                $row = DB::selectOne(
+                    "SELECT COUNT(*) AS cnt FROM pg_stat_statements WHERE mean_exec_time > 1000"
+                );
+                return $row ? (int) $row->cnt : null;
+            }
+
+            return null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get slow query count', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbWaitingQueries(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                $row = DB::selectOne("SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST WHERE STATE != '' AND STATE != 'Sleep' AND STATE LIKE '%wait%'");
+                return $row ? (int) $row->cnt : null;
+            }
+
+            if ($driver === 'pgsql') {
+                $row = DB::selectOne("SELECT COUNT(*) AS cnt FROM pg_stat_activity WHERE wait_event IS NOT NULL AND state = 'active'");
+                return $row ? (int) $row->cnt : null;
+            }
+
+            if ($driver === 'sqlsrv') {
+                try {
+                    $row = DB::selectOne('SELECT COUNT(*) AS cnt FROM sys.dm_exec_requests WHERE blocking_session_id > 0');
+                    return $row ? (int) $row->cnt : null;
+                } catch (\Throwable $e) {
+                    return null;
+                }
+            }
+
+            return null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get waiting query count', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbLargestTables(): array
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+            $dbName = config("database.connections.{$defaultConnection}.database");
+
+            if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                $rows = DB::select(
+                    "SELECT table_name, ROUND((data_length + index_length) / 1024 / 1024, 2) AS size_mb
+                     FROM information_schema.tables
+                     WHERE table_schema = ?
+                     ORDER BY size_mb DESC LIMIT 5",
+                    [$dbName]
+                );
+                return array_map(fn($r) => ['table' => $r->table_name, 'size_mb' => (float) $r->size_mb], $rows);
+            }
+
+            if ($driver === 'pgsql') {
+                $rows = DB::select(
+                    "SELECT relname AS table_name, ROUND(pg_total_relation_size(relid) / 1024.0 / 1024.0, 2) AS size_mb
+                     FROM pg_stat_user_tables
+                     ORDER BY pg_total_relation_size(relid) DESC LIMIT 5"
+                );
+                return array_map(fn($r) => ['table' => $r->table_name, 'size_mb' => (float) $r->size_mb], $rows);
+            }
+
+            if ($driver === 'sqlsrv') {
+                try {
+                    $rows = DB::select(
+                        "SELECT TOP 5 t.name AS table_name,
+                            ROUND((SUM(a.total_pages) * 8) / 1024.0, 2) AS size_mb
+                         FROM sys.tables t
+                         INNER JOIN sys.indexes i ON t.object_id = i.object_id
+                         INNER JOIN sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
+                         INNER JOIN sys.allocation_units a ON p.partition_id = a.container_id
+                         GROUP BY t.name ORDER BY size_mb DESC"
+                    );
+                    return array_map(fn($r) => ['table' => $r->table_name, 'size_mb' => (float) $r->size_mb], $rows);
+                } catch (\Throwable $e) {
+                    return [];
+                }
+            }
+
+            return [];
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get largest tables', ['error' => $e->getMessage()]);
+            return [];
+        }
+    }
+
+    private function getDbAutovacuumStaleness(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if ($driver !== 'pgsql') return null;
+
+            $row = DB::selectOne(
+                "SELECT EXTRACT(EPOCH FROM (NOW() - MIN(GREATEST(last_autovacuum, last_autoanalyze))))::int AS staleness
+                 FROM pg_stat_user_tables
+                 WHERE last_autovacuum IS NOT NULL OR last_autoanalyze IS NOT NULL"
+            );
+
+            return $row && $row->staleness !== null ? (int) $row->staleness : null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get autovacuum staleness', ['error' => $e->getMessage()]);
             return null;
         }
     }
