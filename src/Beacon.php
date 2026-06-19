@@ -214,6 +214,14 @@ class Beacon
             $mssqlBufferCacheHit = $this->getDbMssqlBufferCacheHitRatio();
             $mssqlBatchRequests = $this->getDbMssqlBatchRequestsPerSec();
             $mssqlTempdbMb = $this->getDbMssqlTempdbUsageMb();
+            $binlogDiskMb = $this->getDbBinlogDiskUsageMb();
+            $threadCacheHitRatio = $this->getDbThreadCacheHitRatio();
+            $tablesWithoutPk = $this->getDbTablesWithoutPrimaryKey();
+            $idleInTxn = $this->getDbIdleInTransactionConnections();
+            $replicationSlotLag = $this->getDbReplicationSlotWalRetentionMb();
+            $forcedCheckpointRatio = $this->getDbForcedCheckpointRatio();
+            $fragmentedIndexes = $this->getDbMssqlFragmentedIndexes();
+            $mssqlCompilations = $this->getDbMssqlSqlCompilationsPerSec();
 
             return [
                 'status' => 'healthy',
@@ -224,23 +232,31 @@ class Beacon
                 'connections_used_pct' => $connections['used_pct'],
                 'long_running_queries' => $longRunning,
                 'waiting_queries' => $waitingQueries,
+                'idle_in_transaction_connections' => $idleInTxn,
                 'oldest_open_txn_seconds' => $oldestTxnAge,
                 'deadlocks' => $deadlocks,
                 'row_lock_waits' => $rowLockWaits['count'],
                 'row_lock_avg_wait_ms' => $rowLockWaits['avg_ms'],
                 'undo_history_length' => $undoHistoryLength,
                 'aborted_connections' => $abortedConnections,
+                'thread_cache_hit_ratio' => $threadCacheHitRatio,
                 'slow_queries' => $slowQueries,
                 'tmp_tables_to_disk_pct' => $tmpDiskRatio,
                 'full_table_scans' => $fullTableScans,
                 'table_fragmentation_mb' => $tableFragmentation,
+                'tables_without_pk' => $tablesWithoutPk,
                 'buffer_pool_hit_ratio' => $bufferPoolHitRatio,
                 'bgwriter_backend_writes' => $bgwriterPressure,
+                'forced_checkpoint_ratio' => $forcedCheckpointRatio,
+                'replication_slot_wal_retention_mb' => $replicationSlotLag,
                 'page_life_expectancy' => $pageLifeExpectancy,
                 'mssql_buffer_cache_hit_ratio' => $mssqlBufferCacheHit,
                 'mssql_batch_requests_per_sec' => $mssqlBatchRequests,
+                'mssql_sql_compilations_per_sec' => $mssqlCompilations,
                 'mssql_tempdb_used_mb' => $mssqlTempdbMb,
+                'mssql_fragmented_indexes' => $fragmentedIndexes,
                 'replication_lag_seconds' => $replicationLag,
+                'binlog_disk_usage_mb' => $binlogDiskMb,
                 'size_mb' => $dbSize,
                 'dead_tuples' => $deadTuples,
                 'unused_indexes' => $unusedIndexes,
@@ -991,6 +1007,205 @@ class Beacon
             return $row && $row->used_mb !== null ? (float) $row->used_mb : null;
         } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to get tempdb usage', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbBinlogDiskUsageMb(): ?float
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (!in_array($driver, ['mysql', 'mariadb'], true)) return null;
+
+            $rows = DB::select('SHOW BINARY LOGS');
+            if (empty($rows)) return null;
+
+            $totalBytes = array_sum(array_map(fn($r) => (int) ($r->File_size ?? $r->{'File_size'} ?? 0), $rows));
+            return round($totalBytes / 1024 / 1024, 2);
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    private function getDbThreadCacheHitRatio(): ?float
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (!in_array($driver, ['mysql', 'mariadb'], true)) return null;
+
+            $rows = DB::select("SHOW GLOBAL STATUS WHERE Variable_name IN ('Connections','Threads_created')");
+            $stats = [];
+            foreach ($rows as $row) {
+                $stats[$row->Variable_name] = (int) $row->Value;
+            }
+
+            $connections = $stats['Connections'] ?? 0;
+            $created = $stats['Threads_created'] ?? 0;
+
+            return $connections > 0 ? round((1 - $created / $connections) * 100, 2) : null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get thread cache hit ratio', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbTablesWithoutPrimaryKey(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+            $dbName = config("database.connections.{$defaultConnection}.database");
+
+            if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                $row = DB::selectOne(
+                    "SELECT COUNT(*) AS cnt
+                     FROM information_schema.tables t
+                     LEFT JOIN information_schema.table_constraints c
+                         ON t.table_schema = c.table_schema
+                         AND t.table_name = c.table_name
+                         AND c.constraint_type = 'PRIMARY KEY'
+                     WHERE t.table_schema = ?
+                       AND t.table_type = 'BASE TABLE'
+                       AND c.constraint_name IS NULL",
+                    [$dbName]
+                );
+                return $row ? (int) $row->cnt : null;
+            }
+
+            if ($driver === 'pgsql') {
+                $row = DB::selectOne(
+                    "SELECT COUNT(*) AS cnt
+                     FROM information_schema.tables t
+                     LEFT JOIN information_schema.table_constraints c
+                         ON t.table_schema = c.table_schema
+                         AND t.table_name = c.table_name
+                         AND c.constraint_type = 'PRIMARY KEY'
+                     WHERE t.table_schema = 'public'
+                       AND t.table_type = 'BASE TABLE'
+                       AND c.constraint_name IS NULL"
+                );
+                return $row ? (int) $row->cnt : null;
+            }
+
+            return null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get tables without PK count', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbIdleInTransactionConnections(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if ($driver !== 'pgsql') return null;
+
+            $row = DB::selectOne(
+                "SELECT COUNT(*) AS cnt FROM pg_stat_activity WHERE state = 'idle in transaction'"
+            );
+            return $row ? (int) $row->cnt : null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get idle-in-transaction connections', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbReplicationSlotWalRetentionMb(): ?float
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if ($driver !== 'pgsql') return null;
+
+            $row = DB::selectOne(
+                "SELECT ROUND(SUM(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) / 1024.0 / 1024.0, 2) AS retained_mb
+                 FROM pg_replication_slots"
+            );
+            return $row && $row->retained_mb !== null ? (float) $row->retained_mb : null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get replication slot WAL retention', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbForcedCheckpointRatio(): ?float
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if ($driver !== 'pgsql') return null;
+
+            $row = DB::selectOne(
+                'SELECT checkpoints_timed, checkpoints_req FROM pg_stat_bgwriter'
+            );
+            if (!$row) return null;
+
+            $timed = (int) $row->checkpoints_timed;
+            $req   = (int) $row->checkpoints_req;
+            $total = $timed + $req;
+
+            return $total > 0 ? round(($req / $total) * 100, 2) : null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get forced checkpoint ratio', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbMssqlFragmentedIndexes(): array
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if ($driver !== 'sqlsrv') return [];
+
+            $rows = DB::select(
+                "SELECT TOP 5
+                     OBJECT_NAME(s.object_id) AS table_name,
+                     i.name AS index_name,
+                     ROUND(s.avg_fragmentation_in_percent, 1) AS fragmentation_pct
+                 FROM sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, 'LIMITED') s
+                 INNER JOIN sys.indexes i ON s.object_id = i.object_id AND s.index_id = i.index_id
+                 WHERE s.avg_fragmentation_in_percent > 30
+                   AND s.page_count > 100
+                 ORDER BY s.avg_fragmentation_in_percent DESC"
+            );
+
+            return array_map(fn($r) => [
+                'table' => $r->table_name,
+                'index' => $r->index_name,
+                'fragmentation_pct' => (float) $r->fragmentation_pct,
+            ], $rows);
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get fragmented indexes', ['error' => $e->getMessage()]);
+            return [];
+        }
+    }
+
+    private function getDbMssqlSqlCompilationsPerSec(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if ($driver !== 'sqlsrv') return null;
+
+            $row = DB::selectOne(
+                "SELECT cntr_value FROM sys.dm_os_performance_counters
+                 WHERE counter_name = 'SQL Compilations/sec'
+                 AND object_name LIKE '%SQL Statistics%'"
+            );
+            return $row ? (int) $row->cntr_value : null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get SQL compilations/sec', ['error' => $e->getMessage()]);
             return null;
         }
     }
