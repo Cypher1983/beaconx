@@ -192,6 +192,11 @@ class Beacon
             $locks = $this->getDatabaseLockCount();
             $connections = $this->getDbConnectionStats();
             $longRunning = $this->getDbLongRunningQueries();
+            $deadlocks = $this->getDbDeadlockCount();
+            $bufferPoolHitRatio = $this->getDbBufferPoolHitRatio();
+            $replicationLag = $this->getDbReplicationLag();
+            $dbSize = $this->getDbSizeMb();
+            $deadTuples = $this->getDbDeadTuples();
 
             return [
                 'status' => 'healthy',
@@ -201,6 +206,11 @@ class Beacon
                 'connections_max' => $connections['max'],
                 'connections_used_pct' => $connections['used_pct'],
                 'long_running_queries' => $longRunning,
+                'deadlocks' => $deadlocks,
+                'buffer_pool_hit_ratio' => $bufferPoolHitRatio,
+                'replication_lag_seconds' => $replicationLag,
+                'size_mb' => $dbSize,
+                'dead_tuples' => $deadTuples,
             ];
         } catch (\Throwable $e) {
             return [
@@ -357,6 +367,151 @@ class Beacon
             return null;
         } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to get long-running query count', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbDeadlockCount(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                $row = DB::selectOne("SHOW GLOBAL STATUS LIKE 'Innodb_deadlocks'");
+                return $row ? (int) $row->Value : null;
+            }
+
+            if ($driver === 'pgsql') {
+                $row = DB::selectOne('SELECT SUM(deadlocks) AS cnt FROM pg_stat_database');
+                return $row ? (int) $row->cnt : null;
+            }
+
+            return null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get deadlock count', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbBufferPoolHitRatio(): ?float
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                $rows = DB::select("SHOW GLOBAL STATUS WHERE Variable_name IN ('Innodb_buffer_pool_read_requests','Innodb_buffer_pool_reads')");
+                $stats = [];
+                foreach ($rows as $row) {
+                    $stats[$row->Variable_name] = (float) $row->Value;
+                }
+                $requests = $stats['Innodb_buffer_pool_read_requests'] ?? 0;
+                $diskReads = $stats['Innodb_buffer_pool_reads'] ?? 0;
+                if ($requests === 0.0) return null;
+                return round((($requests - $diskReads) / $requests) * 100, 2);
+            }
+
+            if ($driver === 'pgsql') {
+                $row = DB::selectOne('SELECT SUM(heap_blks_hit) AS hits, SUM(heap_blks_read) AS reads FROM pg_statio_user_tables');
+                if (!$row) return null;
+                $hits = (float) $row->hits;
+                $reads = (float) $row->reads;
+                $total = $hits + $reads;
+                return $total > 0 ? round(($hits / $total) * 100, 2) : null;
+            }
+
+            return null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get buffer pool hit ratio', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbReplicationLag(): ?float
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                try {
+                    $rows = DB::select('SHOW SLAVE STATUS');
+                    if (empty($rows)) {
+                        $rows = DB::select('SHOW REPLICA STATUS');
+                    }
+                    if (empty($rows)) return null;
+                    $lag = $rows[0]->Seconds_Behind_Master ?? $rows[0]->Seconds_Behind_Source ?? null;
+                    return $lag !== null ? (float) $lag : null;
+                } catch (\Throwable $e) {
+                    return null;
+                }
+            }
+
+            if ($driver === 'pgsql') {
+                $row = DB::selectOne("SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) AS lag");
+                if (!$row || $row->lag === null) return null;
+                return round((float) $row->lag, 2);
+            }
+
+            return null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get replication lag', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbSizeMb(): ?float
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+            $dbName = config("database.connections.{$defaultConnection}.database");
+
+            if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                $row = DB::selectOne(
+                    "SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS size_mb
+                     FROM information_schema.tables WHERE table_schema = ?",
+                    [$dbName]
+                );
+                return $row && $row->size_mb !== null ? (float) $row->size_mb : null;
+            }
+
+            if ($driver === 'pgsql') {
+                $row = DB::selectOne('SELECT ROUND(pg_database_size(current_database()) / 1024.0 / 1024.0, 2) AS size_mb');
+                return $row ? (float) $row->size_mb : null;
+            }
+
+            if ($driver === 'sqlsrv') {
+                try {
+                    $row = DB::selectOne(
+                        "SELECT ROUND(SUM(size) * 8.0 / 1024, 2) AS size_mb FROM sys.database_files WHERE type_desc = 'ROWS'"
+                    );
+                    return $row ? (float) $row->size_mb : null;
+                } catch (\Throwable $e) {
+                    return null;
+                }
+            }
+
+            return null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get database size', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbDeadTuples(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if ($driver !== 'pgsql') return null;
+
+            $row = DB::selectOne('SELECT SUM(n_dead_tup) AS cnt FROM pg_stat_user_tables');
+            return $row ? (int) $row->cnt : null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get dead tuple count', ['error' => $e->getMessage()]);
             return null;
         }
     }
