@@ -604,7 +604,11 @@ BeaconX automatically gathers and transmits comprehensive health metrics across 
 
 - **Connection Status:** Database connectivity and health
 - **Query Latency:** Response time for database queries
-- **Active Connections:** Current database connection count
+- **Active Connections:** Current number of open database connections
+- **Max Connections:** Server-configured connection limit (MySQL, PostgreSQL)
+- **Connections Used %:** Active connections as a percentage of the maximum
+- **Active Locks:** Number of active database locks (requires elevated credentials on some drivers)
+- **Long-Running Queries:** Count of queries running longer than 10 seconds
 
 ### Cache Performance
 

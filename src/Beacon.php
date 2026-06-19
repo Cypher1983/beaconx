@@ -190,11 +190,17 @@ class Beacon
             }
 
             $locks = $this->getDatabaseLockCount();
+            $connections = $this->getDbConnectionStats();
+            $longRunning = $this->getDbLongRunningQueries();
 
             return [
                 'status' => 'healthy',
                 'latency_ms' => (float) number_format($latency * 1000, 2, '.', ''),
                 'locks' => $locks,
+                'connections_active' => $connections['active'],
+                'connections_max' => $connections['max'],
+                'connections_used_pct' => $connections['used_pct'],
+                'long_running_queries' => $longRunning,
             ];
         } catch (\Throwable $e) {
             return [
@@ -259,6 +265,98 @@ class Beacon
             ) {
                 Log::warning('BeaconX: Failed to get database lock count', ['error' => $errorMsg]);
             }
+            return null;
+        }
+    }
+
+    private function getDbConnectionStats(): array
+    {
+        $default = ['active' => null, 'max' => null, 'used_pct' => null];
+
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                $status = DB::select("SHOW STATUS WHERE Variable_name IN ('Threads_connected','Max_used_connections')");
+                $vars = DB::select("SHOW VARIABLES WHERE Variable_name = 'max_connections'");
+
+                $active = null;
+                foreach ($status as $row) {
+                    if ($row->Variable_name === 'Threads_connected') {
+                        $active = (int) $row->Value;
+                    }
+                }
+                $max = isset($vars[0]) ? (int) $vars[0]->Value : null;
+                $usedPct = ($active !== null && $max) ? round($active / $max * 100, 2) : null;
+
+                return ['active' => $active, 'max' => $max, 'used_pct' => $usedPct];
+            }
+
+            if ($driver === 'pgsql') {
+                $active = DB::selectOne("SELECT COUNT(*) AS cnt FROM pg_stat_activity WHERE state = 'active'");
+                $max = DB::selectOne("SELECT setting FROM pg_settings WHERE name = 'max_connections'");
+
+                $activeCount = $active ? (int) $active->cnt : null;
+                $maxCount = $max ? (int) $max->setting : null;
+                $usedPct = ($activeCount !== null && $maxCount) ? round($activeCount / $maxCount * 100, 2) : null;
+
+                return ['active' => $activeCount, 'max' => $maxCount, 'used_pct' => $usedPct];
+            }
+
+            if ($driver === 'sqlsrv') {
+                try {
+                    $row = DB::selectOne('SELECT COUNT(*) AS cnt FROM sys.dm_exec_sessions WHERE is_user_process = 1');
+                    $activeCount = $row ? (int) $row->cnt : null;
+                    return ['active' => $activeCount, 'max' => null, 'used_pct' => null];
+                } catch (\Throwable $e) {
+                    $msg = $e->getMessage();
+                    if (str_contains($msg, 'permission was denied') || str_contains($msg, 'Login failed')) {
+                        return $default;
+                    }
+                    throw $e;
+                }
+            }
+
+            return $default;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get connection stats', ['error' => $e->getMessage()]);
+            return $default;
+        }
+    }
+
+    private function getDbLongRunningQueries(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                $row = DB::selectOne("SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST WHERE TIME > 10 AND COMMAND != 'Sleep'");
+                return $row ? (int) $row->cnt : null;
+            }
+
+            if ($driver === 'pgsql') {
+                $row = DB::selectOne("SELECT COUNT(*) AS cnt FROM pg_stat_activity WHERE state = 'active' AND query_start < NOW() - INTERVAL '10 seconds'");
+                return $row ? (int) $row->cnt : null;
+            }
+
+            if ($driver === 'sqlsrv') {
+                try {
+                    $row = DB::selectOne('SELECT COUNT(*) AS cnt FROM sys.dm_exec_requests WHERE total_elapsed_time > 10000');
+                    return $row ? (int) $row->cnt : null;
+                } catch (\Throwable $e) {
+                    $msg = $e->getMessage();
+                    if (str_contains($msg, 'permission was denied') || str_contains($msg, 'Login failed')) {
+                        return null;
+                    }
+                    throw $e;
+                }
+            }
+
+            return null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get long-running query count', ['error' => $e->getMessage()]);
             return null;
         }
     }
