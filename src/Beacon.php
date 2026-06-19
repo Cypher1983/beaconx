@@ -207,6 +207,13 @@ class Beacon
             $pageLifeExpectancy = $this->getDbPageLifeExpectancy();
             $unusedIndexes = $this->getDbUnusedIndexCount();
             $oldestTxnAge = $this->getDbOldestOpenTransactionAge();
+            $tmpDiskRatio = $this->getDbTmpTableDiskRatio();
+            $fullTableScans = $this->getDbFullTableScanRate();
+            $tableFragmentation = $this->getDbTableFragmentationMb();
+            $bgwriterPressure = $this->getDbBgwriterBackendWrites();
+            $mssqlBufferCacheHit = $this->getDbMssqlBufferCacheHitRatio();
+            $mssqlBatchRequests = $this->getDbMssqlBatchRequestsPerSec();
+            $mssqlTempdbMb = $this->getDbMssqlTempdbUsageMb();
 
             return [
                 'status' => 'healthy',
@@ -224,8 +231,15 @@ class Beacon
                 'undo_history_length' => $undoHistoryLength,
                 'aborted_connections' => $abortedConnections,
                 'slow_queries' => $slowQueries,
+                'tmp_tables_to_disk_pct' => $tmpDiskRatio,
+                'full_table_scans' => $fullTableScans,
+                'table_fragmentation_mb' => $tableFragmentation,
                 'buffer_pool_hit_ratio' => $bufferPoolHitRatio,
+                'bgwriter_backend_writes' => $bgwriterPressure,
                 'page_life_expectancy' => $pageLifeExpectancy,
+                'mssql_buffer_cache_hit_ratio' => $mssqlBufferCacheHit,
+                'mssql_batch_requests_per_sec' => $mssqlBatchRequests,
+                'mssql_tempdb_used_mb' => $mssqlTempdbMb,
                 'replication_lag_seconds' => $replicationLag,
                 'size_mb' => $dbSize,
                 'dead_tuples' => $deadTuples,
@@ -821,6 +835,162 @@ class Beacon
             return null;
         } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to get oldest open transaction age', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbTmpTableDiskRatio(): ?float
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (!in_array($driver, ['mysql', 'mariadb'], true)) return null;
+
+            $rows = DB::select("SHOW GLOBAL STATUS WHERE Variable_name IN ('Created_tmp_disk_tables','Created_tmp_tables')");
+            $stats = [];
+            foreach ($rows as $row) {
+                $stats[$row->Variable_name] = (int) $row->Value;
+            }
+
+            $total = $stats['Created_tmp_tables'] ?? 0;
+            $disk = $stats['Created_tmp_disk_tables'] ?? 0;
+
+            return $total > 0 ? round(($disk / $total) * 100, 2) : null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get tmp table disk ratio', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbFullTableScanRate(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (!in_array($driver, ['mysql', 'mariadb'], true)) return null;
+
+            $rows = DB::select("SHOW GLOBAL STATUS WHERE Variable_name IN ('Select_scan','Select_full_join')");
+            $total = 0;
+            foreach ($rows as $row) {
+                $total += (int) $row->Value;
+            }
+
+            return $total;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get full table scan rate', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbTableFragmentationMb(): ?float
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (!in_array($driver, ['mysql', 'mariadb'], true)) return null;
+
+            $dbName = config("database.connections.{$defaultConnection}.database");
+            $row = DB::selectOne(
+                "SELECT ROUND(SUM(DATA_FREE) / 1024 / 1024, 2) AS fragmented_mb
+                 FROM information_schema.tables
+                 WHERE table_schema = ? AND DATA_FREE > 0",
+                [$dbName]
+            );
+
+            return $row && $row->fragmented_mb !== null ? (float) $row->fragmented_mb : 0.0;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get table fragmentation', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbBgwriterBackendWrites(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if ($driver !== 'pgsql') return null;
+
+            $row = DB::selectOne('SELECT buffers_backend FROM pg_stat_bgwriter');
+            return $row ? (int) $row->buffers_backend : null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get bgwriter backend writes', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbMssqlBufferCacheHitRatio(): ?float
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if ($driver !== 'sqlsrv') return null;
+
+            $rows = DB::select(
+                "SELECT counter_name, cntr_value FROM sys.dm_os_performance_counters
+                 WHERE counter_name IN ('Buffer cache hit ratio','Buffer cache hit ratio base')
+                 AND object_name LIKE '%Buffer Manager%'"
+            );
+
+            $values = [];
+            foreach ($rows as $row) {
+                $values[trim($row->counter_name)] = (float) $row->cntr_value;
+            }
+
+            $base = $values['Buffer cache hit ratio base'] ?? 0;
+            $hit  = $values['Buffer cache hit ratio'] ?? null;
+
+            if ($hit === null || $base == 0) return null;
+            return round(($hit / $base) * 100, 2);
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get MSSQL buffer cache hit ratio', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbMssqlBatchRequestsPerSec(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if ($driver !== 'sqlsrv') return null;
+
+            $row = DB::selectOne(
+                "SELECT cntr_value FROM sys.dm_os_performance_counters
+                 WHERE counter_name = 'Batch Requests/sec'
+                 AND object_name LIKE '%SQL Statistics%'"
+            );
+
+            return $row ? (int) $row->cntr_value : null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get MSSQL batch requests/sec', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbMssqlTempdbUsageMb(): ?float
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if ($driver !== 'sqlsrv') return null;
+
+            $row = DB::selectOne(
+                "SELECT ROUND(SUM(unallocated_extent_page_count + version_store_reserved_page_count
+                    + internal_object_reserved_page_count + user_object_reserved_page_count) * 8.0 / 1024, 2) AS used_mb
+                 FROM tempdb.sys.dm_db_file_space_usage"
+            );
+
+            return $row && $row->used_mb !== null ? (float) $row->used_mb : null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get tempdb usage', ['error' => $e->getMessage()]);
             return null;
         }
     }
