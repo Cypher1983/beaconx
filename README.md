@@ -50,7 +50,7 @@ That's it! BeaconX is now monitoring your application.
 ### 1. Requirements
 
 - PHP 8.1+
-- Laravel 10.x or 11.x
+- Laravel 10.x, 11.x, or 12.x
 
 ### 2. Add Repository to Composer
 
@@ -125,6 +125,8 @@ GRANT USAGE ON *.* TO 'beacon_monitor'@'localhost';
 GRANT PROCESS ON *.* TO 'beacon_monitor'@'localhost';
 GRANT SELECT ON performance_schema.* TO 'beacon_monitor'@'localhost';
 GRANT SELECT ON information_schema.* TO 'beacon_monitor'@'localhost';
+GRANT REPLICATION CLIENT ON *.* TO 'beacon_monitor'@'localhost';  -- for SHOW BINARY LOGS
+GRANT REPLICATION SLAVE ON *.* TO 'beacon_monitor'@'localhost';   -- for SHOW SLAVE/REPLICA STATUS
 
 -- For older MySQL versions (5.7), also grant innodb_locks access:
 GRANT SELECT ON information_schema.innodb_locks TO 'beacon_monitor'@'localhost';
@@ -150,6 +152,15 @@ GRANT CONNECT ON DATABASE your_app_database TO beacon_monitor;
 GRANT USAGE ON SCHEMA public TO beacon_monitor;
 GRANT SELECT ON pg_locks TO beacon_monitor;
 GRANT SELECT ON pg_stat_activity TO beacon_monitor;
+GRANT SELECT ON pg_stat_bgwriter TO beacon_monitor;
+GRANT SELECT ON pg_stat_database TO beacon_monitor;
+GRANT SELECT ON pg_stat_user_tables TO beacon_monitor;
+GRANT SELECT ON pg_stat_user_indexes TO beacon_monitor;
+GRANT SELECT ON pg_statio_user_tables TO beacon_monitor;
+GRANT SELECT ON pg_replication_slots TO beacon_monitor;
+GRANT SELECT ON pg_stat_replication TO beacon_monitor;
+GRANT SELECT ON pg_stat_progress_vacuum TO beacon_monitor;
+GRANT pg_monitor TO beacon_monitor;  -- PostgreSQL 10+ convenience role (covers all the above)
 
 -- Apply changes
 \c your_app_database
@@ -169,13 +180,9 @@ CREATE LOGIN beacon_monitor WITH PASSWORD = 'secure_password_here';
 USE your_app_database;
 CREATE USER beacon_monitor FOR LOGIN beacon_monitor;
 
--- Grant monitoring permissions
+-- Grant monitoring permissions (covers all DMV access for BeaconX)
 GRANT VIEW SERVER STATE TO beacon_monitor;
 GRANT VIEW DATABASE STATE TO beacon_monitor;
-
--- Specific lock monitoring permission
-USE your_app_database;
-GRANT SELECT ON sys.dm_tran_locks TO beacon_monitor;
 ```
 
 ##### **Step 2: Add Database Connection to config/database.php**
@@ -602,13 +609,65 @@ BeaconX automatically gathers and transmits comprehensive health metrics across 
 
 ### Database Health
 
-- **Connection Status:** Database connectivity and health
-- **Query Latency:** Response time for database queries
-- **Active Connections:** Current number of open database connections
-- **Max Connections:** Server-configured connection limit (MySQL, PostgreSQL)
-- **Connections Used %:** Active connections as a percentage of the maximum
-- **Active Locks:** Number of active database locks (requires elevated credentials on some drivers)
+BeaconX collects 36 database metrics across MySQL/MariaDB, PostgreSQL, and SQL Server. Metrics marked with a driver badge are only populated for that driver; all others work cross-driver or degrade gracefully to `null`.
+
+#### Connectivity & Latency
+- **Connection Status:** `healthy` / `unhealthy` with error message
+- **Query Latency (ms):** Round-trip time for a `SELECT 1` probe
+- **DB Size (MB):** Total database size in megabytes
+
+#### Connections
+- **Active Connections:** Current open connections
+- **Max Connections:** Server-configured limit (MySQL, PostgreSQL)
+- **Connections Used %:** Active as a percentage of max
+- **Aborted Connections:** Cumulative failed connection attempts — signals pool misconfiguration `[MySQL]`
+- **Thread Cache Hit Ratio (%):** Connections served from thread cache vs. newly created `[MySQL]`
+
+#### Query Activity
 - **Long-Running Queries:** Count of queries running longer than 10 seconds
+- **Waiting / Blocked Queries:** Queries blocked waiting on a lock or resource
+- **Slow Queries:** Cumulative count from the server's slow query log `[MySQL]` / `pg_stat_statements` `[PostgreSQL]`
+- **Full Table Scans:** Cumulative full scans + full joins — proxy for missing indexes `[MySQL]`
+- **Temp Tables to Disk (%):** Percentage of temp tables that spilled to disk — signals `tmp_table_size` pressure `[MySQL]`
+
+#### Transactions & Locks
+- **Active Locks:** Number of current database locks
+- **Deadlocks:** Cumulative deadlock count
+- **Row Lock Waits:** Cumulative times a query waited for a row lock `[MySQL]`
+- **Row Lock Avg Wait (ms):** Average row lock wait time `[MySQL]`
+- **Undo History Length:** InnoDB purge backlog — large values mean a long-running transaction is blocking cleanup `[MySQL]`
+- **Oldest Open Transaction (s):** Age of the oldest uncommitted transaction — catches stuck transactions
+- **Idle-in-Transaction Connections:** Connections with an open transaction but no active query — common application bug that holds locks silently `[PostgreSQL]`
+
+#### Storage & Fragmentation
+- **Table Fragmentation (MB):** Wasted space from DELETEs/UPDATEs across all tables `[MySQL]`
+- **Tables Without Primary Key:** Count of tables missing a primary key — replication and ORM risk
+- **Largest Tables:** Top 5 tables by size (name + MB)
+- **Binary Log Disk Usage (MB):** Total disk space consumed by binary logs — unrotated logs silently fill disk `[MySQL]`
+
+#### Buffer / Cache Efficiency
+- **Buffer Pool Hit Ratio (%):** Percentage of InnoDB reads served from memory — should stay above 99% `[MySQL]`; equivalent buffer cache ratio for PostgreSQL heap blocks
+- **Page Life Expectancy:** Seconds a page stays in the SQL Server buffer pool — below 300 signals memory pressure `[SQL Server]`
+- **MSSQL Buffer Cache Hit Ratio (%):** Percentage of page requests served from memory `[SQL Server]`
+
+#### Index Health
+- **Unused Indexes:** Count of indexes with zero reads since last restart — maintenance signal
+- **MSSQL Fragmented Indexes:** Top 5 indexes with >30% fragmentation and >100 pages (table, index name, fragmentation %) `[SQL Server]`
+
+#### Replication
+- **Replication Lag (s):** Seconds behind primary for replica instances
+- **Replication Slot WAL Retention (MB):** WAL retained by replication slots — an inactive slot causes unbounded disk growth `[PostgreSQL]`
+
+#### PostgreSQL-Specific
+- **Dead Tuples:** Total dead tuples across all user tables — signals VACUUM falling behind
+- **Autovacuum Max Staleness (s):** Seconds since the least-recently vacuumed table was processed
+- **BGWriter Backend Writes:** Buffers written by backends directly — non-zero means checkpoint cannot keep up with I/O demand
+- **Forced Checkpoint Ratio (%):** Percentage of checkpoints that were forced vs. scheduled — high values indicate WAL filling faster than the checkpoint interval
+
+#### SQL Server-Specific
+- **MSSQL Batch Requests/sec:** Cumulative batch request count — load baseline for alerting
+- **MSSQL SQL Compilations/sec:** SQL compilation rate — high values indicate plan cache pressure or unparameterized queries
+- **MSSQL Tempdb Used (MB):** Tempdb space in use — exhaustion crashes the entire SQL Server instance
 
 ### Cache Performance
 
@@ -646,7 +705,7 @@ BeaconX includes comprehensive error handling for all metrics. If a metric canno
 
 ## Contributing
 
-BeaconX now provides comprehensive monitoring capabilities. If you wish to extend the metrics gathered or add new monitoring features, please submit a PR to the internal watchtowerx/beaconx repository. The package is designed to be extensible while maintaining performance and security standards.
+BeaconX provides comprehensive monitoring across 36 database metrics and covers system, cache, security, session, and runtime telemetry. If you wish to extend the metrics gathered or add new monitoring features, please submit a PR to the internal watchtowerx/beaconx repository. The package is designed to be extensible while maintaining performance and security standards.
 
 ## FAQ
 
@@ -715,6 +774,26 @@ A: Yes, restart your Laravel application (or queue workers) to pick up new envir
 **Q: Will monitoring queries affect my database performance?**
 
 A: No, these are read-only queries that execute in milliseconds. The performance_schema is designed for this purpose.
+
+**Q: Why do most new database metrics return `null`?**
+
+A: Many metrics are driver-specific — for example, `undo_history_length` only applies to MySQL, `dead_tuples` only to PostgreSQL, and `mssql_tempdb_used_mb` only to SQL Server. A `null` value means the metric is not applicable to your database driver, not that something is broken.
+
+**Q: Why does `idle_in_transaction_connections` matter?**
+
+A: A connection in the `idle in transaction` state has opened a transaction but sent no query. It holds any locks it acquired until it commits or times out. This is a common application bug (e.g., a connection returned to the pool mid-transaction) that causes seemingly random lock timeouts elsewhere. Alert on this metric if it stays non-zero for extended periods.
+
+**Q: My `replication_slot_wal_retention_mb` is growing — what should I do?**
+
+A: An inactive or stalled replication slot causes PostgreSQL to retain all WAL segments since the slot's restart LSN. This can fill your disk entirely. Identify unused slots with `SELECT * FROM pg_replication_slots WHERE active = false` and drop them with `SELECT pg_drop_replication_slot('slot_name')` if no longer needed.
+
+**Q: What does a high `forced_checkpoint_ratio` mean?**
+
+A: PostgreSQL triggers checkpoints either on schedule (`checkpoints_timed`) or because the WAL has filled (`checkpoints_req`). A high forced ratio means your WAL is filling faster than your checkpoint interval — increase `max_wal_size` or reduce `checkpoint_completion_target` to spread I/O.
+
+**Q: Why is `slow_queries` a cumulative counter, not a current rate?**
+
+A: Both MySQL's `Slow_queries` and PostgreSQL's `pg_stat_statements` expose cumulative counters since the last server restart (or stats reset). Your WatchTowerX hub should compute the delta between transmissions to derive a rate. The raw counter is what BeaconX reports.
 
 ### Troubleshooting
 
