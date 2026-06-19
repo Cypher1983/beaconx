@@ -202,6 +202,11 @@ class Beacon
             $waitingQueries = $this->getDbWaitingQueries();
             $largestTables = $this->getDbLargestTables();
             $autovacuumStaleness = $this->getDbAutovacuumStaleness();
+            $rowLockWaits = $this->getDbRowLockWaits();
+            $undoHistoryLength = $this->getDbUndoHistoryLength();
+            $pageLifeExpectancy = $this->getDbPageLifeExpectancy();
+            $unusedIndexes = $this->getDbUnusedIndexCount();
+            $oldestTxnAge = $this->getDbOldestOpenTransactionAge();
 
             return [
                 'status' => 'healthy',
@@ -212,13 +217,19 @@ class Beacon
                 'connections_used_pct' => $connections['used_pct'],
                 'long_running_queries' => $longRunning,
                 'waiting_queries' => $waitingQueries,
+                'oldest_open_txn_seconds' => $oldestTxnAge,
                 'deadlocks' => $deadlocks,
+                'row_lock_waits' => $rowLockWaits['count'],
+                'row_lock_avg_wait_ms' => $rowLockWaits['avg_ms'],
+                'undo_history_length' => $undoHistoryLength,
                 'aborted_connections' => $abortedConnections,
                 'slow_queries' => $slowQueries,
                 'buffer_pool_hit_ratio' => $bufferPoolHitRatio,
+                'page_life_expectancy' => $pageLifeExpectancy,
                 'replication_lag_seconds' => $replicationLag,
                 'size_mb' => $dbSize,
                 'dead_tuples' => $deadTuples,
+                'unused_indexes' => $unusedIndexes,
                 'autovacuum_max_staleness_seconds' => $autovacuumStaleness,
                 'largest_tables' => $largestTables,
             ];
@@ -669,6 +680,147 @@ class Beacon
             return $row && $row->staleness !== null ? (int) $row->staleness : null;
         } catch (\Throwable $e) {
             Log::warning('BeaconX: Failed to get autovacuum staleness', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbRowLockWaits(): array
+    {
+        $default = ['count' => null, 'avg_ms' => null];
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (!in_array($driver, ['mysql', 'mariadb'], true)) return $default;
+
+            $rows = DB::select("SHOW GLOBAL STATUS WHERE Variable_name IN ('Innodb_row_lock_waits','Innodb_row_lock_time_avg')");
+            $stats = [];
+            foreach ($rows as $row) {
+                $stats[$row->Variable_name] = $row->Value;
+            }
+
+            return [
+                'count' => isset($stats['Innodb_row_lock_waits']) ? (int) $stats['Innodb_row_lock_waits'] : null,
+                'avg_ms' => isset($stats['Innodb_row_lock_time_avg']) ? (float) $stats['Innodb_row_lock_time_avg'] : null,
+            ];
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get row lock waits', ['error' => $e->getMessage()]);
+            return $default;
+        }
+    }
+
+    private function getDbUndoHistoryLength(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (!in_array($driver, ['mysql', 'mariadb'], true)) return null;
+
+            $rows = DB::select('SHOW ENGINE INNODB STATUS');
+            if (empty($rows)) return null;
+
+            $status = $rows[0]->Status ?? '';
+            if (preg_match('/History list length\s+(\d+)/i', $status, $m)) {
+                return (int) $m[1];
+            }
+
+            return null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get undo history length', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbPageLifeExpectancy(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if ($driver !== 'sqlsrv') return null;
+
+            $row = DB::selectOne(
+                "SELECT cntr_value FROM sys.dm_os_performance_counters
+                 WHERE counter_name = 'Page life expectancy'
+                 AND object_name LIKE '%Buffer Manager%'"
+            );
+
+            return $row ? (int) $row->cntr_value : null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get page life expectancy', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbUnusedIndexCount(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if ($driver === 'pgsql') {
+                $row = DB::selectOne(
+                    "SELECT COUNT(*) AS cnt FROM pg_stat_user_indexes
+                     WHERE idx_scan = 0 AND indexrelname NOT LIKE '%pkey%'"
+                );
+                return $row ? (int) $row->cnt : null;
+            }
+
+            if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                $dbName = config("database.connections.{$defaultConnection}.database");
+                $row = DB::selectOne(
+                    "SELECT COUNT(*) AS cnt FROM sys.schema_unused_indexes
+                     WHERE object_schema = ?",
+                    [$dbName]
+                );
+                return $row ? (int) $row->cnt : null;
+            }
+
+            return null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get unused index count', ['error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function getDbOldestOpenTransactionAge(): ?int
+    {
+        try {
+            $defaultConnection = config('database.default');
+            $driver = config("database.connections.{$defaultConnection}.driver");
+
+            if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                $row = DB::selectOne(
+                    "SELECT MAX(TIME) AS age FROM information_schema.INNODB_TRX"
+                );
+                return $row && $row->age !== null ? (int) $row->age : null;
+            }
+
+            if ($driver === 'pgsql') {
+                $row = DB::selectOne(
+                    "SELECT EXTRACT(EPOCH FROM (NOW() - MIN(xact_start)))::int AS age
+                     FROM pg_stat_activity
+                     WHERE xact_start IS NOT NULL AND state != 'idle'"
+                );
+                return $row && $row->age !== null ? (int) $row->age : null;
+            }
+
+            if ($driver === 'sqlsrv') {
+                try {
+                    $row = DB::selectOne(
+                        "SELECT MAX(DATEDIFF(SECOND, transaction_begin_time, GETDATE())) AS age
+                         FROM sys.dm_tran_active_transactions"
+                    );
+                    return $row && $row->age !== null ? (int) $row->age : null;
+                } catch (\Throwable $e) {
+                    return null;
+                }
+            }
+
+            return null;
+        } catch (\Throwable $e) {
+            Log::warning('BeaconX: Failed to get oldest open transaction age', ['error' => $e->getMessage()]);
             return null;
         }
     }
