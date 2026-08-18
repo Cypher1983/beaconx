@@ -49,7 +49,7 @@ That's it! BeaconX is now monitoring your application.
 
 ### 1. Requirements
 
-- PHP 8.1+
+- PHP 8.1+ (PHP 7.3+ for BeaconX 7.x, see compatibility table below)
 - Laravel 10.x, 11.x, 12.x, or 13.x
 
 ### 2. Add Repository to Composer
@@ -61,7 +61,7 @@ Since BeaconX is hosted on GitHub and not available on Packagist, you need to ad
   "repositories": [
     {
       "type": "vcs",
-      "url": "https://github.com/watchtowerx/beaconx.git"
+      "url": "https://github.com/Cypher1983/beaconx.git"
     }
   ]
 }
@@ -69,11 +69,24 @@ Since BeaconX is hosted on GitHub and not available on Packagist, you need to ad
 
 ### 3. Install via Composer
 
-Add the package to your Laravel application:
+Composer resolves the correct BeaconX version automatically based on your installed Laravel version, so a plain require works for most apps:
 
 ```bash
 composer require watchtowerx/beaconx
 ```
+
+If you need to pin a specific version (e.g. to stay on an older Laravel release), use the compatibility table below to pick a constraint:
+
+| Laravel Version | BeaconX Version | Install Command |
+|---|---|---|
+| 13.x | ^8.4 | `composer require watchtowerx/beaconx:^8.4` |
+| 12.x | ^8.2 | `composer require watchtowerx/beaconx:^8.2` |
+| 11.x | ^7.0 or ^8.2 | `composer require watchtowerx/beaconx:^8.2` |
+| 10.x | ^7.0 or ^8.2 | `composer require watchtowerx/beaconx:^8.2` |
+| 9.x | ^7.0 | `composer require watchtowerx/beaconx:^7.0` |
+| 8.x | ^7.0 | `composer require watchtowerx/beaconx:^7.0` |
+
+> BeaconX 8.x requires PHP 8.1+. BeaconX 7.x supports PHP 7.3+ for older Laravel 8/9 apps.
 
 ### 4. Publish Configuration
 
