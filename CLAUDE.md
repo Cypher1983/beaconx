@@ -295,13 +295,13 @@ From `composer.json`:
 ```json
 "require": {
     "php": "^8.1",
-    "illuminate/support": "^10.0|^11.0|^12.0",
-    "illuminate/console": "^10.0|^11.0|^12.0",
-    "illuminate/http": "^10.0|^11.0|^12.0"
+    "illuminate/support": "^10.0|^11.0|^12.0|^13.0",
+    "illuminate/console": "^10.0|^11.0|^12.0|^13.0",
+    "illuminate/http": "^10.0|^11.0|^12.0|^13.0"
 }
 ```
 
-- Supports Laravel 10, 11, and 12
+- Supports Laravel 10, 11, 12, and 13
 - Only 3 Illuminate packages; no external monitoring libraries
 - Uses native PHP for system metrics
 
